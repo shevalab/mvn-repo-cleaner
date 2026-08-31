@@ -63,6 +63,20 @@ Plain text, **one absolute path per line** (as produced by `--export`). Lines
 are trimmed; empty lines are ignored. This is the format expected by
 `--from-file`, so you can export, hand-edit, and re-import a list.
 
+## Build
+
+Build the executable (writes `mvn-repo-cleaner` in the current directory):
+
+```sh
+go build -o mvn-repo-cleaner ./cmd/mvn-repo-cleaner
+```
+
+Cross-compile for Windows:
+
+```sh
+GOOS=windows go build -o mvn-repo-cleaner.exe ./cmd/mvn-repo-cleaner
+```
+
 ## Development
 
 ```sh
