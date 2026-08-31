@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/vadim/mvn-repo-cleaner/internal/model"
+	"github.com/shevalab/mvn-repo-cleaner/internal/model"
 )
 
 // rawPOM mirrors the subset of a Maven POM we need for resolution.

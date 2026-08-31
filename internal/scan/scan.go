@@ -5,8 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/vadim/mvn-repo-cleaner/internal/model"
-	"github.com/vadim/mvn-repo-cleaner/internal/resolve"
+	"github.com/shevalab/mvn-repo-cleaner/internal/model"
+	"github.com/shevalab/mvn-repo-cleaner/internal/resolve"
 )
 
 // FindPoms walks root recursively and returns all pom.xml file paths.

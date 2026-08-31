@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vadim/mvn-repo-cleaner/internal/model"
+	"github.com/shevalab/mvn-repo-cleaner/internal/model"
 )
 
 // writePOM writes a pom.xml under repoDir/<group path>/<artifact>/<version>/

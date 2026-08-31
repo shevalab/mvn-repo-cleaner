@@ -5,10 +5,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/vadim/mvn-repo-cleaner/internal/cli"
-	"github.com/vadim/mvn-repo-cleaner/internal/repo"
-	"github.com/vadim/mvn-repo-cleaner/internal/resolve"
-	"github.com/vadim/mvn-repo-cleaner/internal/scan"
+	"github.com/shevalab/mvn-repo-cleaner/internal/cli"
+	"github.com/shevalab/mvn-repo-cleaner/internal/repo"
+	"github.com/shevalab/mvn-repo-cleaner/internal/resolve"
+	"github.com/shevalab/mvn-repo-cleaner/internal/scan"
 )
 
 func main() {

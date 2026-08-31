@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vadim/mvn-repo-cleaner/internal/cli"
-	"github.com/vadim/mvn-repo-cleaner/internal/repo"
+	"github.com/shevalab/mvn-repo-cleaner/internal/cli"
+	"github.com/shevalab/mvn-repo-cleaner/internal/repo"
 )
 
 func writePom(t *testing.T, repo, group, artifact, version string) {

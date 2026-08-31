@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/vadim/mvn-repo-cleaner/internal/model"
+	"github.com/shevalab/mvn-repo-cleaner/internal/model"
 )
 
 func TestFindPomsRecursive(t *testing.T) {

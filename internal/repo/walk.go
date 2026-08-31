@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/vadim/mvn-repo-cleaner/internal/model"
+	"github.com/shevalab/mvn-repo-cleaner/internal/model"
 )
 
 // Walk enumerates the artifacts and versions present under the repository root.

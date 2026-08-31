@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/vadim/mvn-repo-cleaner/internal/model"
+	"github.com/shevalab/mvn-repo-cleaner/internal/model"
 )
 
 // Loader loads POMs from a local Maven repository.
