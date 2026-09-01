@@ -93,12 +93,19 @@ func computeStale(cfg *cli.Config) []string {
 	loader := &resolve.Loader{Repo: cfg.Repo}
 	useSet := scan.NewInUseSet()
 	for _, path := range cfg.Paths {
+		fmt.Printf("Processing %s\n", path)
 		poms, err := scan.FindPoms(path)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "warn: scan", path, err)
 			continue
 		}
 		for _, pom := range poms {
+			// Print the folder being processed relative to the project root.
+			if rel, err := filepath.Rel(path, pom); err == nil {
+				fmt.Printf("%s\n", rel)
+			} else {
+				fmt.Printf("%s\n", pom)
+			}
 			res, err := scan.ScanProject(loader, pom)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "warn: resolve", pom, err)
