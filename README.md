@@ -22,10 +22,21 @@ that is not in use — safely (dry-run by default).
 - **Direct dependencies** of a project are kept at **any scope** (`compile`,
   `provided`, `runtime`, `test`, `system`) — deleting a test or provided
   dependency would break rebuilding or running the tests.
+- **Every `dependencyManagement` entry** of a scanned project is kept. A managed
+  entry is an explicit declaration that the project pins a coordinate, even when
+  it is not consumed as a live dependency (e.g. zip resources unpacked by the
+  `maven-dependency-plugin` or shared BOM-managed versions).
+- **`dependencyManagement` precedence** follows Maven: a project's own entries
+  override entries imported from BOMs and inherited from parents.
 - **Transitive dependencies** are kept for `compile`/`runtime` scopes only,
   matching Maven's propagation rules.
 - **Build plugins** and entries in **`pluginManagement`** are kept (plugins
   declared without a `<groupId>` use Maven's default `org.apache.maven.plugins`).
+- **Plugin configuration `artifactItem` references** are kept. The
+  `maven-dependency-plugin` (and similar plugins) unpack artifacts listed in
+  `<configuration><artifactItems>` even though they are not `<dependency>`s.
+- **Profile references** (dependencies, dependencyManagement and plugins inside
+  `<profiles>`) are kept conservatively, regardless of activation.
 - **Imported BOMs** (`<scope>import</scope>` in `dependencyManagement`) are kept,
   and the versions they manage are applied to versionless dependencies.
 

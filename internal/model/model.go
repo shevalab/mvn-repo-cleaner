@@ -58,6 +58,17 @@ type POM struct {
 	DependencyManagement []ManagedDep
 	Plugins              []Plugin
 	PluginManagement     []Plugin
+	Profiles             []Profile
+}
+
+// Profile is a build profile. Its dependencies, dependencyManagement, plugins
+// and properties only apply when the profile is active. The cleaner is
+// conservative and treats profile references as in-use regardless of activation.
+type Profile struct {
+	Properties           map[string]string
+	Dependencies         []Dep
+	DependencyManagement []ManagedDep
+	Plugins              []Plugin
 }
 
 // Plugin is a build plugin coordinate declared in <build>.
@@ -65,6 +76,11 @@ type Plugin struct {
 	GroupID    string
 	ArtifactID string
 	Version    string
+	// ArtifactItems are additional artifacts referenced by a plugin's
+	// <configuration><artifactItems><artifactItem> block (e.g. the
+	// maven-dependency-plugin unpack goal). These are coordinates the project
+	// uses at build time even though they are not declared as <dependency>s.
+	ArtifactItems []Coordinate
 }
 
 // Parent references a parent POM coordinate.

@@ -22,72 +22,159 @@ func (e *noPOMError) Error() string { return "incomplete coordinate: no pom" }
 // Resolve computes the full transitive in-use set (artifact -> versions) for a
 // scanned root pom file, including parent POMs which are used for inheritance.
 func (l *Loader) Resolve(rootPom string) (map[model.Artifact]map[string]bool, error) {
-    inUse := map[model.Artifact]map[string]bool{}
-    root, err := ParsePOM(rootPom)
-    if err != nil {
-        return nil, err
-    }
-    // Add any parent hierarchy as in-use artifacts.
-    if err := l.addParentChain(root, inUse); err != nil {
-        // continue even if parent chain can't be fully resolved
-    }
-    eff, err := l.effective(root, map[string]string{})
-    if err != nil {
-        // Even if effective fails, keep whatever coordinate we can.
-        if eff == nil {
-            return inUse, nil
-        }
-    }
-    if eff.Coord.GroupID != "" && eff.Coord.Version != "" {
-        addVersion(inUse, eff.Coord)
-    }
-    // Record build plugins, pluginManagement, and imported BOMs as in-use so the
-    // cleaner does not delete the build toolchain coordinates.
-    for _, pl := range eff.PluginMgr {
-        addVersion(inUse, model.Coordinate{Artifact: model.Artifact{GroupID: pl.GroupID, ArtifactID: pl.ArtifactID}, Version: pl.Version})
-    }
-    for _, pl := range eff.Plugins {
-        addVersion(inUse, model.Coordinate{Artifact: model.Artifact{GroupID: pl.GroupID, ArtifactID: pl.ArtifactID}, Version: pl.Version})
-    }
-    for _, b := range eff.BOMs {
-        addVersion(inUse, b)
-    }
-    visited := map[string]bool{}
-    l.expand(eff, nil, visited, inUse, true)
-    return inUse, nil
+	inUse := map[model.Artifact]map[string]bool{}
+	root, err := ParsePOM(rootPom)
+	if err != nil {
+		return nil, err
+	}
+	// Add any parent hierarchy as in-use artifacts.
+	if err := l.addParentChain(root, inUse); err != nil {
+		// continue even if parent chain can't be fully resolved
+	}
+	eff, err := l.effective(root, map[string]string{})
+	if err != nil {
+		// Even if effective fails, keep whatever coordinate we can.
+		if eff == nil {
+			return inUse, nil
+		}
+	}
+	if eff.Coord.GroupID != "" && eff.Coord.Version != "" {
+		addVersion(inUse, eff.Coord)
+	}
+	// Record build plugins, pluginManagement, and imported BOMs as in-use so the
+	// cleaner does not delete the build toolchain coordinates.
+	for _, pl := range eff.PluginMgr {
+		addVersion(inUse, model.Coordinate{Artifact: model.Artifact{GroupID: pl.GroupID, ArtifactID: pl.ArtifactID}, Version: pl.Version})
+		recordPluginItems(inUse, pl)
+	}
+	for _, pl := range eff.Plugins {
+		addVersion(inUse, model.Coordinate{Artifact: model.Artifact{GroupID: pl.GroupID, ArtifactID: pl.ArtifactID}, Version: pl.Version})
+		recordPluginItems(inUse, pl)
+	}
+	for _, b := range eff.BOMs {
+		addVersion(inUse, b)
+	}
+	// Every dependencyManagement entry is an explicit declaration by the project
+	// that it manages/pins that coordinate, so it counts as in-use (matches the
+	// audit scripts). Import-scoped BOM entries are not coordinates themselves
+	// beyond the BOM coordinate already recorded above.
+	for _, m := range eff.Managed {
+		if m.Scope == "import" {
+			continue
+		}
+		recordManaged(inUse, m)
+	}
+	// Profile references are conservatively in-use regardless of activation.
+	for _, prof := range eff.Profiles {
+		recordProfile(inUse, prof)
+	}
+	visited := map[string]bool{}
+	l.expand(eff, nil, visited, inUse, true)
+	return inUse, nil
+}
+
+// recordManaged marks a dependencyManagement entry as in-use. If its version
+// cannot be resolved to a concrete value (e.g. an unresolved ${property}), the
+// artifact is marked conservative so every on-disk version is preserved.
+func recordManaged(inUse map[model.Artifact]map[string]bool, m model.ManagedDep) {
+	a := model.Artifact{GroupID: m.GroupID, ArtifactID: m.ArtifactID}
+	if a.GroupID == "" || a.ArtifactID == "" {
+		return
+	}
+	if m.Version == "" || strings.Contains(m.Version, "${") {
+		keepAll(inUse, a)
+		return
+	}
+	addVersion(inUse, model.Coordinate{Artifact: a, Version: m.Version})
+}
+
+// recordProfile marks the references declared within a single profile as in-use.
+func recordProfile(inUse map[model.Artifact]map[string]bool, prof model.Profile) {
+	for _, d := range prof.Dependencies {
+		recordDep(inUse, d)
+	}
+	for _, m := range prof.DependencyManagement {
+		if m.Scope == "import" {
+			continue
+		}
+		recordManaged(inUse, m)
+	}
+	for _, pl := range prof.Plugins {
+		addVersion(inUse, model.Coordinate{Artifact: model.Artifact{GroupID: pl.GroupID, ArtifactID: pl.ArtifactID}, Version: pl.Version})
+		recordPluginItems(inUse, pl)
+	}
+}
+
+// recordDep marks a declared dependency as in-use, resolving a missing version to
+// conservative keep-all.
+func recordDep(inUse map[model.Artifact]map[string]bool, d model.Dep) {
+	a := model.Artifact{GroupID: d.GroupID, ArtifactID: d.ArtifactID}
+	if a.GroupID == "" || a.ArtifactID == "" {
+		return
+	}
+	if d.Version == "" || strings.Contains(d.Version, "${") {
+		keepAll(inUse, a)
+		return
+	}
+	addVersion(inUse, model.Coordinate{Artifact: a, Version: d.Version})
+}
+
+// recordPluginItems marks artifacts referenced via a plugin's configuration
+// artifactItems block (e.g. maven-dependency-plugin unpack) as in-use.
+func recordPluginItems(inUse map[model.Artifact]map[string]bool, pl model.Plugin) {
+	for _, item := range pl.ArtifactItems {
+		a := item.Artifact
+		if a.GroupID == "" || a.ArtifactID == "" {
+			continue
+		}
+		if item.Version == "" || strings.Contains(item.Version, "${") {
+			keepAll(inUse, a)
+			continue
+		}
+		addVersion(inUse, item)
+	}
+}
+
+// keepAll marks an artifact as in-use at an unknown version so every on-disk
+// version is preserved (conservative).
+func keepAll(inUse map[model.Artifact]map[string]bool, a model.Artifact) {
+	if inUse[a] == nil {
+		inUse[a] = map[string]bool{}
+	}
+	inUse[a][model.KeepAllVersion] = true
 }
 
 // addParentChain walks the parent chain of a POM and records each parent artifact/version as in‑use.
 func (l *Loader) addParentChain(p *model.POM, inUse map[model.Artifact]map[string]bool) error {
-    // Resolve properties for interpolation of the parent fields.
-    props := map[string]string{}
-    if p.Properties != nil {
-        for k, v := range p.Properties {
-            props[k] = v
-        }
-    }
-    for p.Parent != nil {
-        pg := interp(p.Parent.GroupID, props)
-        pa := interp(p.Parent.ArtifactID, props)
-        pv := interp(p.Parent.Version, props)
-        if pg == "" || pa == "" || pv == "" {
-            break
-        }
-        addVersion(inUse, model.Coordinate{Artifact: model.Artifact{GroupID: pg, ArtifactID: pa}, Version: pv})
-        // Load the parent POM to continue up the chain.
-        parentPOM, err := l.parseFromRepo(pg, pa, pv)
-        if err != nil {
-            return err
-        }
-        // Merge parent properties for next iteration.
-        for k, v := range parentPOM.Properties {
-            if _, exists := props[k]; !exists {
-                props[k] = v
-            }
-        }
-        p = parentPOM
-    }
-    return nil
+	// Resolve properties for interpolation of the parent fields.
+	props := map[string]string{}
+	if p.Properties != nil {
+		for k, v := range p.Properties {
+			props[k] = v
+		}
+	}
+	for p.Parent != nil {
+		pg := interp(p.Parent.GroupID, props)
+		pa := interp(p.Parent.ArtifactID, props)
+		pv := interp(p.Parent.Version, props)
+		if pg == "" || pa == "" || pv == "" {
+			break
+		}
+		addVersion(inUse, model.Coordinate{Artifact: model.Artifact{GroupID: pg, ArtifactID: pa}, Version: pv})
+		// Load the parent POM to continue up the chain.
+		parentPOM, err := l.parseFromRepo(pg, pa, pv)
+		if err != nil {
+			return err
+		}
+		// Merge parent properties for next iteration.
+		for k, v := range parentPOM.Properties {
+			if _, exists := props[k]; !exists {
+				props[k] = v
+			}
+		}
+		p = parentPOM
+	}
+	return nil
 }
 
 // effectivePOM is a parent-resolved POM with merged properties and management.
@@ -99,6 +186,7 @@ type effectivePOM struct {
 	Plugins    []model.Plugin
 	PluginMgr  map[model.Artifact]model.Plugin
 	BOMs       []model.Coordinate
+	Profiles   []model.Profile
 }
 
 // effective resolves a POM: walks the parent chain to inherit coordinates,
@@ -117,6 +205,7 @@ func (l *Loader) effective(p *model.POM, inherited map[string]string) (*effectiv
 	pluginMgr := map[model.Artifact]model.Plugin{}
 	var inheritedPlugins []model.Plugin
 	var inheritedBOMs []model.Coordinate
+	var inheritedProfiles []model.Profile
 
 	// Resolve the parent chain first.
 	if p.Parent != nil {
@@ -138,9 +227,10 @@ func (l *Loader) effective(p *model.POM, inherited map[string]string) (*effectiv
 				for a, m := range parentEff.PluginMgr {
 					pluginMgr[a] = m
 				}
-				// Inherit parent build plugins and imported BOMs.
+				// Inherit parent build plugins, imported BOMs and profiles.
 				inheritedPlugins = append(inheritedPlugins, parentEff.Plugins...)
 				inheritedBOMs = append(inheritedBOMs, parentEff.BOMs...)
+				inheritedProfiles = append(inheritedProfiles, parentEff.Profiles...)
 				if group == "" {
 					group = parentEff.Coord.GroupID
 				}
@@ -174,17 +264,8 @@ func (l *Loader) effective(p *model.POM, inherited map[string]string) (*effectiv
 	}
 
 	eff.Depts = p.Dependencies
-	// Apply this POM's own dependencyManagement (overrides inherited).
-	for _, m := range p.DependencyManagement {
-		mm := model.ManagedDep{
-			GroupID:    interp(m.GroupID, props),
-			ArtifactID: interp(m.ArtifactID, props),
-			Version:    interp(m.Version, props),
-			Scope:      m.Scope,
-		}
-		managed[model.Artifact{GroupID: mm.GroupID, ArtifactID: mm.ArtifactID}] = mm
-	}
-	// Import-scope BOMs: merge their dependencyManagement and keep them in use.
+	// Import-scope BOMs first: merge their dependencyManagement into the managed
+	// set (lower precedence) and keep the BOMs themselves in use.
 	eff.BOMs = append(eff.BOMs, inheritedBOMs...)
 	for _, m := range p.DependencyManagement {
 		if m.Scope != "import" {
@@ -200,12 +281,24 @@ func (l *Loader) effective(p *model.POM, inherited map[string]string) (*effectiv
 		eff.BOMs = append(eff.BOMs, bomCoord)
 		l.applyBOM(bomCoord, props, managed, &eff.BOMs)
 	}
+	// Apply this POM's own dependencyManagement last so it overrides inherited
+	// and imported-BOM entries (matches Maven precedence).
+	for _, m := range p.DependencyManagement {
+		mm := model.ManagedDep{
+			GroupID:    interp(m.GroupID, props),
+			ArtifactID: interp(m.ArtifactID, props),
+			Version:    interp(m.Version, props),
+			Scope:      m.Scope,
+		}
+		managed[model.Artifact{GroupID: mm.GroupID, ArtifactID: mm.ArtifactID}] = mm
+	}
 	// Apply this POM's own pluginManagement (overrides inherited).
 	for _, pl := range p.PluginManagement {
 		pp := model.Plugin{
-			GroupID:    interp(pl.GroupID, props),
-			ArtifactID: interp(pl.ArtifactID, props),
-			Version:    interp(pl.Version, props),
+			GroupID:       interp(pl.GroupID, props),
+			ArtifactID:    interp(pl.ArtifactID, props),
+			Version:       interp(pl.Version, props),
+			ArtifactItems: pl.ArtifactItems,
 		}
 		pluginMgr[model.Artifact{GroupID: pp.GroupID, ArtifactID: pp.ArtifactID}] = pp
 	}
@@ -213,11 +306,15 @@ func (l *Loader) effective(p *model.POM, inherited map[string]string) (*effectiv
 	eff.Plugins = append(eff.Plugins, inheritedPlugins...)
 	for _, pl := range p.Plugins {
 		eff.Plugins = append(eff.Plugins, model.Plugin{
-			GroupID:    interp(pl.GroupID, props),
-			ArtifactID: interp(pl.ArtifactID, props),
-			Version:    interp(pl.Version, props),
+			GroupID:       interp(pl.GroupID, props),
+			ArtifactID:    interp(pl.ArtifactID, props),
+			Version:       interp(pl.Version, props),
+			ArtifactItems: pl.ArtifactItems,
 		})
 	}
+	// Include the POM's own profiles (inherited first so order is stable).
+	eff.Profiles = append(eff.Profiles, inheritedProfiles...)
+	eff.Profiles = append(eff.Profiles, p.Profiles...)
 	return eff, nil
 }
 

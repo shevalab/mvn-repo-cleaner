@@ -350,7 +350,173 @@ func TestResolveTransitiveScope(t *testing.T) {
 	}
 }
 
+func TestResolveBOMImportPrecedence(t *testing.T) {
+	repo := t.TempDir()
+	// The imported BOM manages dep:1.0, but the project's own dependencyManagement
+	// overrides it to dep:2.0. The project's own entry must win (Maven precedence).
+	writePOM(t, repo, "org.bom", "bom", "1.0", `<project>
+		<groupId>org.bom</groupId><artifactId>bom</artifactId><version>1.0</version><packaging>pom</packaging>
+		<dependencyManagement>
+			<dependencies>
+				<dependency><groupId>org.z</groupId><artifactId>dep</artifactId><version>1.0</version></dependency>
+			</dependencies>
+		</dependencyManagement>
+	</project>`)
+	root := filepath.Join(repo, "root", "pom.xml")
+	os.MkdirAll(filepath.Dir(root), 0o755)
+	os.WriteFile(root, []byte(`<project>
+		<groupId>org.root</groupId><artifactId>root</artifactId><version>1.0</version>
+		<dependencyManagement>
+			<dependencies>
+				<dependency><groupId>org.bom</groupId><artifactId>bom</artifactId><version>1.0</version><scope>import</scope></dependency>
+				<dependency><groupId>org.z</groupId><artifactId>dep</artifactId><version>2.0</version></dependency>
+			</dependencies>
+		</dependencyManagement>
+		<dependencies>
+			<dependency><groupId>org.z</groupId><artifactId>dep</artifactId></dependency>
+		</dependencies>
+	</project>`), 0o644)
+	l := &Loader{Repo: repo}
+	inUse, err := l.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has(inUse, "org.z", "dep", "2.0") {
+		t.Fatalf("project's own dependencyManagement should override BOM, got %+v", inUse)
+	}
+	if has(inUse, "org.z", "dep", "1.0") {
+		t.Fatalf("BOM-managed version should be overridden by project's own, got %+v", inUse)
+	}
+}
+
 func has(set map[model.Artifact]map[string]bool, g, a, v string) bool {
 	vers := set[model.Artifact{GroupID: g, ArtifactID: a}]
 	return vers[v]
+}
+
+func TestResolveManagedOnlyKept(t *testing.T) {
+	repo := t.TempDir()
+	// A versionless-dep is NOT declared; only dependencyManagement references it.
+	// The cleaner must still treat it as in-use because it is an explicit
+	// declaration (matches the audit scripts' definition).
+	root := filepath.Join(repo, "root", "pom.xml")
+	os.MkdirAll(filepath.Dir(root), 0o755)
+	os.WriteFile(root, []byte(`<project>
+		<groupId>org.root</groupId><artifactId>root</artifactId><version>1.0</version>
+		<dependencyManagement>
+			<dependencies>
+				<dependency><groupId>org.m</groupId><artifactId>managed-only</artifactId><version>5.0</version></dependency>
+			</dependencies>
+		</dependencyManagement>
+	</project>`), 0o644)
+	l := &Loader{Repo: repo}
+	inUse, err := l.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has(inUse, "org.m", "managed-only", "5.0") {
+		t.Fatalf("dependencyManagement-only entry should be in-use, got %+v", inUse)
+	}
+}
+
+func TestResolveManagedUnresolvedVersionKeepAll(t *testing.T) {
+	repo := t.TempDir()
+	root := filepath.Join(repo, "root", "pom.xml")
+	os.MkdirAll(filepath.Dir(root), 0o755)
+	os.WriteFile(root, []byte(`<project>
+		<groupId>org.root</groupId><artifactId>root</artifactId><version>1.0</version>
+		<dependencyManagement>
+			<dependencies>
+				<dependency><groupId>org.m</groupId><artifactId>unresolved</artifactId><version>${missing.prop}</version></dependency>
+			</dependencies>
+		</dependencyManagement>
+	</project>`), 0o644)
+	l := &Loader{Repo: repo}
+	inUse, err := l.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vers := inUse[model.Artifact{GroupID: "org.m", ArtifactID: "unresolved"}]
+	if !vers[model.KeepAllVersion] {
+		t.Fatalf("unresolved managed version should keep all versions, got %+v", vers)
+	}
+}
+
+func TestResolvePluginArtifactItems(t *testing.T) {
+	repo := t.TempDir()
+	root := filepath.Join(repo, "root", "pom.xml")
+	os.MkdirAll(filepath.Dir(root), 0o755)
+	os.WriteFile(root, []byte(`<project>
+		<groupId>org.root</groupId><artifactId>root</artifactId><version>1.0</version>
+		<properties>
+			<webclient.version>0.0.216</webclient.version>
+		</properties>
+		<build>
+			<plugins>
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-dependency-plugin</artifactId>
+					<version>3.6.0</version>
+					<executions><execution><goals><goal>unpack</goal></goals></execution></executions>
+					<configuration>
+						<artifactItems>
+							<artifactItem>
+								<groupId>com.acme</groupId>
+								<artifactId>web-client</artifactId>
+								<version>${webclient.version}</version>
+								<type>zip</type>
+							</artifactItem>
+						</artifactItems>
+					</configuration>
+				</plugin>
+			</plugins>
+		</build>
+	</project>`), 0o644)
+	l := &Loader{Repo: repo}
+	inUse, err := l.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has(inUse, "com.acme", "web-client", "0.0.216") {
+		t.Fatalf("artifactItem reference should be in-use, got %+v", inUse)
+	}
+}
+
+func TestResolveProfiles(t *testing.T) {
+	repo := t.TempDir()
+	root := filepath.Join(repo, "root", "pom.xml")
+	os.MkdirAll(filepath.Dir(root), 0o755)
+	os.WriteFile(root, []byte(`<project>
+		<groupId>org.root</groupId><artifactId>root</artifactId><version>1.0</version>
+		<profiles>
+			<profile>
+				<id>prod</id>
+				<dependencies>
+					<dependency><groupId>org.p</groupId><artifactId>prod-dep</artifactId><version>2.0</version></dependency>
+				</dependencies>
+				<dependencyManagement>
+					<dependencies>
+						<dependency><groupId>org.p</groupId><artifactId>managed-dep</artifactId><version>3.0</version></dependency>
+					</dependencies>
+				</dependencyManagement>
+				<build><plugins>
+					<plugin><groupId>org.p</groupId><artifactId>prof-plugin</artifactId><version>4.0</version></plugin>
+				</plugins></build>
+			</profile>
+		</profiles>
+	</project>`), 0o644)
+	l := &Loader{Repo: repo}
+	inUse, err := l.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range [][3]string{
+		{"org.p", "prod-dep", "2.0"},
+		{"org.p", "managed-dep", "3.0"},
+		{"org.p", "prof-plugin", "4.0"},
+	} {
+		if !has(inUse, want[0], want[1], want[2]) {
+			t.Fatalf("profile reference %s:%s:%s should be in-use, got %+v", want[0], want[1], want[2], inUse)
+		}
+	}
 }
