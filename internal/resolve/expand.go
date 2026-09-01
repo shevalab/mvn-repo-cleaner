@@ -20,26 +20,74 @@ type noPOMError struct{}
 func (e *noPOMError) Error() string { return "incomplete coordinate: no pom" }
 
 // Resolve computes the full transitive in-use set (artifact -> versions) for a
-// scanned root pom file.
+// scanned root pom file, including parent POMs which are used for inheritance.
 func (l *Loader) Resolve(rootPom string) (map[model.Artifact]map[string]bool, error) {
-	inUse := map[model.Artifact]map[string]bool{}
-	root, err := ParsePOM(rootPom)
-	if err != nil {
-		return nil, err
-	}
-	eff, err := l.effective(root, map[string]string{})
-	if err != nil {
-		// Even if effective fails, keep whatever coordinate we can.
-		if eff == nil {
-			return inUse, nil
-		}
-	}
-	if eff.Coord.GroupID != "" && eff.Coord.Version != "" {
-		addVersion(inUse, eff.Coord)
-	}
-	visited := map[string]bool{}
-	l.expand(eff, nil, visited, inUse)
-	return inUse, nil
+    inUse := map[model.Artifact]map[string]bool{}
+    root, err := ParsePOM(rootPom)
+    if err != nil {
+        return nil, err
+    }
+    // Add any parent hierarchy as in-use artifacts.
+    if err := l.addParentChain(root, inUse); err != nil {
+        // continue even if parent chain can't be fully resolved
+    }
+    eff, err := l.effective(root, map[string]string{})
+    if err != nil {
+        // Even if effective fails, keep whatever coordinate we can.
+        if eff == nil {
+            return inUse, nil
+        }
+    }
+    if eff.Coord.GroupID != "" && eff.Coord.Version != "" {
+        addVersion(inUse, eff.Coord)
+    }
+    // Record build plugins, pluginManagement, and imported BOMs as in-use so the
+    // cleaner does not delete the build toolchain coordinates.
+    for _, pl := range eff.PluginMgr {
+        addVersion(inUse, model.Coordinate{Artifact: model.Artifact{GroupID: pl.GroupID, ArtifactID: pl.ArtifactID}, Version: pl.Version})
+    }
+    for _, pl := range eff.Plugins {
+        addVersion(inUse, model.Coordinate{Artifact: model.Artifact{GroupID: pl.GroupID, ArtifactID: pl.ArtifactID}, Version: pl.Version})
+    }
+    for _, b := range eff.BOMs {
+        addVersion(inUse, b)
+    }
+    visited := map[string]bool{}
+    l.expand(eff, nil, visited, inUse, true)
+    return inUse, nil
+}
+
+// addParentChain walks the parent chain of a POM and records each parent artifact/version as in‑use.
+func (l *Loader) addParentChain(p *model.POM, inUse map[model.Artifact]map[string]bool) error {
+    // Resolve properties for interpolation of the parent fields.
+    props := map[string]string{}
+    if p.Properties != nil {
+        for k, v := range p.Properties {
+            props[k] = v
+        }
+    }
+    for p.Parent != nil {
+        pg := interp(p.Parent.GroupID, props)
+        pa := interp(p.Parent.ArtifactID, props)
+        pv := interp(p.Parent.Version, props)
+        if pg == "" || pa == "" || pv == "" {
+            break
+        }
+        addVersion(inUse, model.Coordinate{Artifact: model.Artifact{GroupID: pg, ArtifactID: pa}, Version: pv})
+        // Load the parent POM to continue up the chain.
+        parentPOM, err := l.parseFromRepo(pg, pa, pv)
+        if err != nil {
+            return err
+        }
+        // Merge parent properties for next iteration.
+        for k, v := range parentPOM.Properties {
+            if _, exists := props[k]; !exists {
+                props[k] = v
+            }
+        }
+        p = parentPOM
+    }
+    return nil
 }
 
 // effectivePOM is a parent-resolved POM with merged properties and management.
@@ -48,6 +96,9 @@ type effectivePOM struct {
 	Properties map[string]string
 	Depts      []model.Dep
 	Managed    map[model.Artifact]model.ManagedDep
+	Plugins    []model.Plugin
+	PluginMgr  map[model.Artifact]model.Plugin
+	BOMs       []model.Coordinate
 }
 
 // effective resolves a POM: walks the parent chain to inherit coordinates,
@@ -63,6 +114,9 @@ func (l *Loader) effective(p *model.POM, inherited map[string]string) (*effectiv
 
 	group, artifact, version := p.GroupID, p.ArtifactID, p.Version
 	managed := map[model.Artifact]model.ManagedDep{}
+	pluginMgr := map[model.Artifact]model.Plugin{}
+	var inheritedPlugins []model.Plugin
+	var inheritedBOMs []model.Coordinate
 
 	// Resolve the parent chain first.
 	if p.Parent != nil {
@@ -81,6 +135,12 @@ func (l *Loader) effective(p *model.POM, inherited map[string]string) (*effectiv
 				for a, m := range parentEff.Managed {
 					managed[a] = m
 				}
+				for a, m := range parentEff.PluginMgr {
+					pluginMgr[a] = m
+				}
+				// Inherit parent build plugins and imported BOMs.
+				inheritedPlugins = append(inheritedPlugins, parentEff.Plugins...)
+				inheritedBOMs = append(inheritedBOMs, parentEff.BOMs...)
 				if group == "" {
 					group = parentEff.Coord.GroupID
 				}
@@ -110,6 +170,7 @@ func (l *Loader) effective(p *model.POM, inherited map[string]string) (*effectiv
 		},
 		Properties: props,
 		Managed:    managed,
+		PluginMgr:  pluginMgr,
 	}
 
 	eff.Depts = p.Dependencies
@@ -123,6 +184,40 @@ func (l *Loader) effective(p *model.POM, inherited map[string]string) (*effectiv
 		}
 		managed[model.Artifact{GroupID: mm.GroupID, ArtifactID: mm.ArtifactID}] = mm
 	}
+	// Import-scope BOMs: merge their dependencyManagement and keep them in use.
+	eff.BOMs = append(eff.BOMs, inheritedBOMs...)
+	for _, m := range p.DependencyManagement {
+		if m.Scope != "import" {
+			continue
+		}
+		mg := interp(m.GroupID, props)
+		ma := interp(m.ArtifactID, props)
+		mv := interp(m.Version, props)
+		if mg == "" || ma == "" || mv == "" {
+			continue
+		}
+		bomCoord := model.Coordinate{Artifact: model.Artifact{GroupID: mg, ArtifactID: ma}, Version: mv}
+		eff.BOMs = append(eff.BOMs, bomCoord)
+		l.applyBOM(bomCoord, props, managed, &eff.BOMs)
+	}
+	// Apply this POM's own pluginManagement (overrides inherited).
+	for _, pl := range p.PluginManagement {
+		pp := model.Plugin{
+			GroupID:    interp(pl.GroupID, props),
+			ArtifactID: interp(pl.ArtifactID, props),
+			Version:    interp(pl.Version, props),
+		}
+		pluginMgr[model.Artifact{GroupID: pp.GroupID, ArtifactID: pp.ArtifactID}] = pp
+	}
+	// This POM's own build plugins (inherited first so build order matches).
+	eff.Plugins = append(eff.Plugins, inheritedPlugins...)
+	for _, pl := range p.Plugins {
+		eff.Plugins = append(eff.Plugins, model.Plugin{
+			GroupID:    interp(pl.GroupID, props),
+			ArtifactID: interp(pl.ArtifactID, props),
+			Version:    interp(pl.Version, props),
+		})
+	}
 	return eff, nil
 }
 
@@ -132,6 +227,27 @@ func (l *Loader) parseFromRepo(group, artifact, version string) (*model.POM, err
 	}
 	path := filepath.Join(l.RepoDir(model.Coordinate{Artifact: model.Artifact{GroupID: group, ArtifactID: artifact}, Version: version}), artifact+"-"+version+".pom")
 	return ParsePOM(path)
+}
+
+// applyBOM loads an import-scoped BOM, merges its dependencyManagement into the
+// managed map, and recurses into any nested BOMs it imports.
+func (l *Loader) applyBOM(bom model.Coordinate, props map[string]string, managed map[model.Artifact]model.ManagedDep, boms *[]model.Coordinate) {
+	pom, err := l.parseFromRepo(bom.GroupID, bom.ArtifactID, bom.Version)
+	if err != nil {
+		return
+	}
+	for _, m := range pom.DependencyManagement {
+		mg := interp(m.GroupID, props)
+		ma := interp(m.ArtifactID, props)
+		mv := interp(m.Version, props)
+		mm := model.ManagedDep{GroupID: mg, ArtifactID: ma, Version: mv, Scope: m.Scope}
+		managed[model.Artifact{GroupID: mg, ArtifactID: ma}] = mm
+		if m.Scope == "import" && mg != "" && ma != "" && mv != "" {
+			nested := model.Coordinate{Artifact: model.Artifact{GroupID: mg, ArtifactID: ma}, Version: mv}
+			*boms = append(*boms, nested)
+			l.applyBOM(nested, props, managed, boms)
+		}
+	}
 }
 
 // RepoDir returns the version directory path for a coordinate. Maven stores
@@ -145,10 +261,15 @@ func repoDir(repo, group, artifact, version string) string {
 	return filepath.Join(repo, filepath.FromSlash(groupPath), artifact, version)
 }
 
-// expand walks the dependency tree, populating inUse.
-func (l *Loader) expand(eff *effectivePOM, excludes map[model.Artifact]bool, visited map[string]bool, inUse map[model.Artifact]map[string]bool) {
+// expand walks the dependency tree, populating inUse. For the root project all
+// declared scopes count; for transitive dependencies only propagated (compile/
+// runtime) scopes do.
+func (l *Loader) expand(eff *effectivePOM, excludes map[model.Artifact]bool, visited map[string]bool, inUse map[model.Artifact]map[string]bool, root bool) {
 	for _, d := range eff.Depts {
-		if !model.IsInUseScope(d.Scope) {
+		if root && !model.IsInUseScope(d.Scope) {
+			continue
+		}
+		if !root && !model.IsPropagatedScope(d.Scope) {
 			continue
 		}
 		dd := model.Dep{
@@ -181,6 +302,7 @@ func (l *Loader) expand(eff *effectivePOM, excludes map[model.Artifact]bool, vis
 			if inUse[a] == nil {
 				inUse[a] = map[string]bool{}
 			}
+			inUse[a][model.KeepAllVersion] = true
 			continue
 		}
 		coord := model.Coordinate{Artifact: a, Version: version}
@@ -203,7 +325,7 @@ func (l *Loader) expand(eff *effectivePOM, excludes map[model.Artifact]bool, vis
 		}
 		childEff.Managed = mergeManaged(eff.Managed, childEff.Managed)
 		childExcludes := mergeExcludes(excludes, dd.Exclusions)
-		l.expand(childEff, childExcludes, visited, inUse)
+		l.expand(childEff, childExcludes, visited, inUse, false)
 	}
 }
 

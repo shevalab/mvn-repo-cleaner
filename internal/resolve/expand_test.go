@@ -179,6 +179,108 @@ func TestResolveDependencyManagement(t *testing.T) {
 	}
 }
 
+func TestResolveBuildPlugins(t *testing.T) {
+	repo := t.TempDir()
+	writePOM(t, repo, "org.plugin", "my-compiler-plugin", "3.0", `<project><groupId>org.plugin</groupId><artifactId>my-compiler-plugin</artifactId><version>3.0</version></project>`)
+	root := filepath.Join(repo, "root", "pom.xml")
+	os.MkdirAll(filepath.Dir(root), 0o755)
+	os.WriteFile(root, []byte(`<project>
+		<groupId>org.root</groupId><artifactId>root</artifactId><version>1.0</version>
+		<build>
+			<plugins>
+				<plugin>
+					<groupId>org.plugin</groupId><artifactId>my-compiler-plugin</artifactId><version>3.0</version>
+				</plugin>
+			</plugins>
+			<pluginManagement>
+				<plugins>
+					<plugin>
+						<groupId>org.plugin</groupId><artifactId>my-surefire-plugin</artifactId><version>2.4</version>
+					</plugin>
+				</plugins>
+			</pluginManagement>
+		</build>
+	</project>`), 0o644)
+	l := &Loader{Repo: repo}
+	inUse, err := l.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has(inUse, "org.plugin", "my-compiler-plugin", "3.0") {
+		t.Fatalf("expected build plugin in use, got %+v", inUse)
+	}
+	if !has(inUse, "org.plugin", "my-surefire-plugin", "2.4") {
+		t.Fatalf("expected pluginManagement in use, got %+v", inUse)
+	}
+}
+
+func TestResolveDefaultPluginGroup(t *testing.T) {
+	repo := t.TempDir()
+	writePOM(t, repo, defaultPluginGroup, "maven-compiler-plugin", "3.3", `<project><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.3</version></project>`)
+	root := filepath.Join(repo, "root", "pom.xml")
+	os.MkdirAll(filepath.Dir(root), 0o755)
+	os.WriteFile(root, []byte(`<project>
+		<groupId>org.root</groupId><artifactId>root</artifactId><version>1.0</version>
+		<build>
+			<plugins>
+				<plugin>
+					<artifactId>maven-compiler-plugin</artifactId>
+					<version>3.3</version>
+				</plugin>
+			</plugins>
+		</build>
+	</project>`), 0o644)
+	l := &Loader{Repo: repo}
+	inUse, err := l.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A plugin without <groupId> uses the org.apache.maven.plugins default, so
+	// the on-disk coordinate must be matched.
+	if !has(inUse, defaultPluginGroup, "maven-compiler-plugin", "3.3") {
+		t.Fatalf("expected default plugin group in use, got %+v", inUse)
+	}
+}
+
+func TestResolveBOMImport(t *testing.T) {
+	repo := t.TempDir()
+	// BOM manages a version; a project imports it and uses its managed dep.
+	writePOM(t, repo, "org.bom", "bom", "1.0", `<project>
+		<groupId>org.bom</groupId><artifactId>bom</artifactId><version>1.0</version><packaging>pom</packaging>
+		<dependencyManagement>
+			<dependencies>
+				<dependency><groupId>org.x</groupId><artifactId>lib</artifactId><version>7.7</version></dependency>
+			</dependencies>
+		</dependencyManagement>
+	</project>`)
+	writePOM(t, repo, "org.x", "lib", "7.7", `<project><groupId>org.x</groupId><artifactId>lib</artifactId><version>7.7</version></project>`)
+	root := filepath.Join(repo, "root", "pom.xml")
+	os.MkdirAll(filepath.Dir(root), 0o755)
+	os.WriteFile(root, []byte(`<project>
+		<groupId>org.root</groupId><artifactId>root</artifactId><version>1.0</version>
+		<dependencyManagement>
+			<dependencies>
+				<dependency><groupId>org.bom</groupId><artifactId>bom</artifactId><version>1.0</version><scope>import</scope></dependency>
+			</dependencies>
+		</dependencyManagement>
+		<dependencies>
+			<dependency><groupId>org.x</groupId><artifactId>lib</artifactId></dependency>
+		</dependencies>
+	</project>`), 0o644)
+	l := &Loader{Repo: repo}
+	inUse, err := l.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The BOM itself and the dependency it manages must both be in use.
+	if !has(inUse, "org.bom", "bom", "1.0") {
+		t.Fatalf("expected imported BOM in use, got %+v", inUse)
+	}
+	if !has(inUse, "org.x", "lib", "7.7") {
+		t.Fatalf("expected BOM-managed dep in use, got %+v", inUse)
+	}
+}
+
 // projectPOM writes a root-style project pom with the given dependency block.
 func projectPOM(t *testing.T, repo, name, version, deps string) string {
 	t.Helper()
@@ -195,6 +297,57 @@ func projectPOM(t *testing.T, repo, name, version, deps string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestResolveNonRuntimeScopes(t *testing.T) {
+	repo := t.TempDir()
+	writePOM(t, repo, "org.test", "junit", "4.13", `<project><groupId>org.test</groupId><artifactId>junit</artifactId><version>4.13</version></project>`)
+	writePOM(t, repo, "org.prov", "lombok", "1.18", `<project><groupId>org.prov</groupId><artifactId>lombok</artifactId><version>1.18</version></project>`)
+	root := filepath.Join(repo, "root", "pom.xml")
+	os.MkdirAll(filepath.Dir(root), 0o755)
+	os.WriteFile(root, []byte(`<project>
+		<groupId>org.root</groupId><artifactId>root</artifactId><version>1.0</version>
+		<dependencies>
+			<dependency><groupId>org.test</groupId><artifactId>junit</artifactId><version>4.13</version><scope>test</scope></dependency>
+			<dependency><groupId>org.prov</groupId><artifactId>lombok</artifactId><version>1.18</version><scope>provided</scope></dependency>
+		</dependencies>
+	</project>`), 0o644)
+	l := &Loader{Repo: repo}
+	inUse, err := l.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has(inUse, "org.test", "junit", "4.13") {
+		t.Fatalf("test-scoped dep should be in-use, got %+v", inUse)
+	}
+	if !has(inUse, "org.prov", "lombok", "1.18") {
+		t.Fatalf("provided-scoped dep should be in-use, got %+v", inUse)
+	}
+}
+
+func TestResolveTransitiveScope(t *testing.T) {
+	repo := t.TempDir()
+	// a (compile) depends on b (test). Maven does not propagate test scope, so
+	// b must NOT be treated as in-use when reached transitively.
+	writePOM(t, repo, "org.a", "a", "1.0", `<project>
+		<groupId>org.a</groupId><artifactId>a</artifactId><version>1.0</version>
+		<dependencies>
+			<dependency><groupId>org.b</groupId><artifactId>b</artifactId><version>1.0</version><scope>test</scope></dependency>
+		</dependencies>
+	</project>`)
+	writePOM(t, repo, "org.b", "b", "1.0", `<project><groupId>org.b</groupId><artifactId>b</artifactId><version>1.0</version></project>`)
+	rootPom := projectPOM(t, repo, "root", "1.0", `<dependency><groupId>org.a</groupId><artifactId>a</artifactId><version>1.0</version></dependency>`)
+	l := &Loader{Repo: repo}
+	inUse, err := l.Resolve(rootPom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has(inUse, "org.a", "a", "1.0") {
+		t.Fatalf("expected a in use, got %+v", inUse)
+	}
+	if has(inUse, "org.b", "b", "1.0") {
+		t.Fatalf("test-scoped transitive dep should not propagate, got %+v", inUse)
+	}
 }
 
 func has(set map[model.Artifact]map[string]bool, g, a, v string) bool {

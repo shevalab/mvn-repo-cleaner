@@ -21,6 +21,22 @@ type rawPOM struct {
 	Properties           *rawProperties           `xml:"properties"`
 	Dependencies         []rawDep                 `xml:"dependencies>dependency"`
 	DependencyManagement *rawDependencyManagement `xml:"dependencyManagement"`
+	Build                *rawBuild                `xml:"build"`
+}
+
+type rawBuild struct {
+	Plugins          []rawPlugin          `xml:"plugins>plugin"`
+	PluginManagement *rawPluginManagement `xml:"pluginManagement"`
+}
+
+type rawPluginManagement struct {
+	Plugins []rawPlugin `xml:"plugins>plugin"`
+}
+
+type rawPlugin struct {
+	GroupID    string `xml:"groupId"`
+	ArtifactID string `xml:"artifactId"`
+	Version    string `xml:"version"`
 }
 
 // rawProperties captures arbitrary nested property elements as a map.
@@ -93,6 +109,24 @@ func interp(s string, props map[string]string) string {
 	})
 }
 
+// defaultPluginGroup is the Maven default groupId for build plugins declared
+// without an explicit <groupId>.
+const defaultPluginGroup = "org.apache.maven.plugins"
+
+// plugin from a raw plugin element, defaulting the groupId to Maven's standard
+// plugin group when omitted.
+func pluginFrom(raw rawPlugin, props map[string]string) model.Plugin {
+	g := interp(raw.GroupID, props)
+	if g == "" {
+		g = defaultPluginGroup
+	}
+	return model.Plugin{
+		GroupID:    g,
+		ArtifactID: interp(raw.ArtifactID, props),
+		Version:    interp(raw.Version, props),
+	}
+}
+
 // ParsePOM reads and parses a pom.xml file into a model.POM.
 func ParsePOM(path string) (*model.POM, error) {
 	f, err := os.Open(path)
@@ -160,6 +194,17 @@ func ParsePOM(path string) (*model.POM, error) {
 				Version:    interp(d.Version, props),
 				Scope:      normalizeScope(d.Scope),
 			})
+		}
+	}
+
+	if raw.Build != nil {
+		for _, pl := range raw.Build.Plugins {
+			p.Plugins = append(p.Plugins, pluginFrom(pl, props))
+		}
+		if raw.Build.PluginManagement != nil {
+			for _, pl := range raw.Build.PluginManagement.Plugins {
+				p.PluginManagement = append(p.PluginManagement, pluginFrom(pl, props))
+			}
 		}
 	}
 

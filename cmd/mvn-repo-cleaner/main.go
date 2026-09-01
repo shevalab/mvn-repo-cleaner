@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/shevalab/mvn-repo-cleaner/internal/cli"
+	"github.com/shevalab/mvn-repo-cleaner/internal/model"
 	"github.com/shevalab/mvn-repo-cleaner/internal/repo"
 	"github.com/shevalab/mvn-repo-cleaner/internal/resolve"
 	"github.com/shevalab/mvn-repo-cleaner/internal/scan"
@@ -117,11 +118,18 @@ func computeStale(cfg *cli.Config) []string {
 	for art, versions := range onDisk {
 		inUseVersions, present := useSet[art]
 		// present=false: artifact not used at all -> every version stale.
-		// present=true but empty map: in-use at unknown version -> keep all.
+		// present=true but empty map or keep-all sentinel: in-use at unknown
+		// version -> keep all.
 		if !present {
 			for _, v := range versions {
 				stale = append(stale, repo.VersionDir(cfg.Repo, art.GroupID, art.ArtifactID, v))
 			}
+			continue
+		}
+		if len(inUseVersions) == 0 || inUseVersions[model.KeepAllVersion] {
+			// The artifact is in use but no concrete version could be
+			// resolved (e.g. unresolvable parent/management). Be conservative
+			// and keep every version.
 			continue
 		}
 		for _, v := range versions {

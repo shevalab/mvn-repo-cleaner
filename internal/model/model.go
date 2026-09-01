@@ -8,6 +8,11 @@ type Artifact struct {
 	ArtifactID string
 }
 
+// KeepAllVersion is a sentinel version key used in in-use sets to mean "this
+// artifact is in use but no concrete version could be resolved; keep every
+// version on disk". It can never collide with a real Maven version.
+const KeepAllVersion = "\x00*keep-all*"
+
 func (a Artifact) String() string {
 	return a.GroupID + ":" + a.ArtifactID
 }
@@ -22,10 +27,21 @@ func (c Coordinate) String() string {
 	return c.GroupID + ":" + c.ArtifactID + ":" + c.Version
 }
 
-// Scopes is the set of dependency scopes that are relevant for a runtime
-// build classpath. Others (test, provided, etc.) are not considered in-use
-// resources that should be kept.
-var Scopes = map[string]bool{
+// DeclaredScopes are the scopes of a project's own declared dependencies that
+// are relevant for retention. Provided and test dependencies are referenced in
+// the build and must not be deleted, even though they are not on the runtime
+// classpath.
+var DeclaredScopes = map[string]bool{
+	"compile":  true,
+	"provided": true,
+	"runtime":  true,
+	"test":     true,
+	"system":   true,
+}
+
+// PropagatedScopes are the scopes inherited when expanding a transitive
+// dependency's own dependencies. Maven only propagates compile/runtime.
+var PropagatedScopes = map[string]bool{
 	"compile": true,
 	"runtime": true,
 }
@@ -40,6 +56,15 @@ type POM struct {
 	Properties           map[string]string
 	Dependencies         []Dep
 	DependencyManagement []ManagedDep
+	Plugins              []Plugin
+	PluginManagement     []Plugin
+}
+
+// Plugin is a build plugin coordinate declared in <build>.
+type Plugin struct {
+	GroupID    string
+	ArtifactID string
+	Version    string
 }
 
 // Parent references a parent POM coordinate.
@@ -79,7 +104,14 @@ func (c Coordinate) RepoPath(repo string) string {
 	return repo + "/" + group + "/" + c.ArtifactID + "/" + c.Version
 }
 
-// IsInUseScope reports whether a scope counts as in-use for retention.
+// IsInUseScope reports whether a scope counts as a project's own declared
+// dependency for retention.
 func IsInUseScope(scope string) bool {
-	return Scopes[scope]
+	return DeclaredScopes[scope]
+}
+
+// IsPropagatedScope reports whether a scope is inherited when expanding a
+// transitive dependency's own dependencies.
+func IsPropagatedScope(scope string) bool {
+	return PropagatedScopes[scope]
 }

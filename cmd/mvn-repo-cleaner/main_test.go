@@ -111,3 +111,39 @@ func TestEndToEndStale(t *testing.T) {
 		t.Error("api:2.0 should remain")
 	}
 }
+
+// TestEndToEndStaleUnknownVersion covers the conservative path: a dependency
+// whose version cannot be concretely resolved (missing parent/management) is
+// still treated as in use, so ALL of its versions are kept.
+func TestEndToEndStaleUnknownVersion(t *testing.T) {
+	repodir := t.TempDir()
+	projectRoot := t.TempDir()
+
+	// org.loose:lib exists in two versions on disk; a project declares
+	// org.loose:lib with no version and no resolvable management, so the
+	// resolver cannot pin a concrete version.
+	writePom(t, repodir, "org.loose", "lib", "1.0")
+	writePom(t, repodir, "org.loose", "lib", "2.0")
+
+	// Project declares the versionless dependency but its parent/management
+	// are absent from the repo, so resolution marks lib in-use w/o a version.
+	dir := filepath.Join(projectRoot, "proj")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "pom.xml"), []byte(`<project>
+		<groupId>org.app</groupId><artifactId>proj</artifactId><version>1.0</version>
+		<dependencies>
+			<dependency><groupId>org.loose</groupId><artifactId>lib</artifactId></dependency>
+		</dependencies>
+	</project>`), 0o644)
+
+	cfg := &cli.Config{Paths: []string{projectRoot}, Repo: repodir, Mode: "scan"}
+	stale := computeStale(cfg)
+
+	for _, p := range stale {
+		if strings.Contains(p, "/org/loose/lib/") {
+			t.Fatalf("org.loose:lib is conservative-in-use and must not be stale, got %s", p)
+		}
+	}
+}
